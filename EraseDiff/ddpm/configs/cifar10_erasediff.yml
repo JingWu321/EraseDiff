@@ -33,7 +33,7 @@ diffusion:
     num_diffusion_timesteps: 1000
 
 training:
-    batch_size: 512
+    batch_size: 128
     snapshot_freq: 5
     log_freq: 5
     visualization_samples: 100
