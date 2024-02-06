@@ -10,7 +10,7 @@
 <p align="center">
   <img src="./Images/teaser.png" width="80%">
   <br />
-  <span>Figure 1: Generated samples by our method, EraseDiff, to erase the targeted class/concept. \algname can forget classes and avoid NSFW content.</span>
+  <span>Figure 1: Generated samples by our method, EraseDiff, to erase the targeted class/concept. EraseDiff can forget classes and avoid NSFW content.</span>
 </p>
 
 
