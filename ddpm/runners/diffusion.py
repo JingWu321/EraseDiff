@@ -583,18 +583,21 @@ class Diffusion(object):
         return net
 
 
+    # SA
     def train_forget(self):
 
         args, config = self.args, self.config
         logging.info(f"Training diffusion forget with contrastive and EWC. Gamma: {config.training.gamma}, lambda: {config.training.lmbda}")
-        # D_train_loader = all_but_one_class_path_dataset(config, os.path.join(args.ckpt_folder, "class_samples"), args.label_to_forget)
-        # D_train_iter = cycle(D_train_loader)
-        num_classes, trainloader_all, D_train_iter, _, _ = load_data(args)
+        # trainloader_rem = all_but_one_class_path_dataset(config, os.path.join(args.ckpt_folder, "class_samples"), args.label_to_forget)
+        _, _, trainloader_rem, _, _ = load_data(args)
+        D_train_iter = cycle(trainloader_rem)
 
         print("Loading checkpoints {}".format(args.ckpt_folder))
         model = Conditional_Model(config)
-        print(f"Number of parameters: {count_parameters(model)//1e6:.2f}M")
-        states = torch.load(os.path.join(args.ckpt_folder, "ckpts/cifar10_ddpm.pth"), map_location=self.device,)
+        states = torch.load(
+            os.path.join(args.ckpt_folder, "ckpts/cifar10_ddpm.pth"),
+            map_location=self.device,
+        )
         model = model.to(self.device)
         model = torch.nn.DataParallel(model)
         model.load_state_dict(states[0], strict=True)
@@ -618,89 +621,82 @@ class Diffusion(object):
         label_choices = list(range(config.data.n_classes))
         label_choices.remove(args.label_to_forget)
 
-        for step_ in range(0, config.training.n_iters):
+        for step in range(0, config.training.n_iters):
 
             model.train()
-            for step, (x_remember, c_remember) in enumerate(D_train_iter):
-                x_remember, c_remember = x_remember.to(self.device), c_remember.to(self.device)
+            x_remember, c_remember = next(D_train_iter)
+            x_remember, c_remember = x_remember.to(self.device), c_remember.to(self.device)
+            x_remember = data_transform(config, x_remember)
 
-                n = x_remember.size(0)
-                channels = config.data.channels
-                img_size = config.data.image_size
-                c_forget = (torch.ones(n, dtype=int) * args.label_to_forget).to(self.device)
-                x_forget = ( torch.rand((n, channels, img_size, img_size), device=self.device) - 0.5 ) * 2.
-                e_remember = torch.randn_like(x_remember)
-                e_forget = torch.randn_like(x_forget)
-                b = self.betas
+            n = x_remember.size(0)
+            channels = config.data.channels
+            img_size = config.data.image_size
+            c_forget = (torch.ones(n, dtype=int) * args.label_to_forget).to(self.device)
+            x_forget = ( torch.rand((n, channels, img_size, img_size), device=self.device) - 0.5 ) * 2.
+            e_remember = torch.randn_like(x_remember)
+            e_forget = torch.randn_like(x_forget)
+            b = self.betas
 
-                # antithetic sampling
-                t = torch.randint(
-                    low=0, high=self.num_timesteps, size=(n // 2 + 1,)
-                ).to(self.device)
-                t = torch.cat([t, self.num_timesteps - t - 1], dim=0)[:n]
-                loss = loss_registry_conditional[config.model.type](model, x_forget, t, c_forget, e_forget, b, cond_drop_prob = 0.) + \
-                    config.training.gamma * loss_registry_conditional[config.model.type](model, x_remember, t, c_remember, e_remember, b, cond_drop_prob = 0.)
-                forgetting_loss = loss.item()
+            # antithetic sampling
+            t = torch.randint(
+                low=0, high=self.num_timesteps, size=(n // 2 + 1,)
+            ).to(self.device)
+            t = torch.cat([t, self.num_timesteps - t - 1], dim=0)[:n]
+            loss = loss_registry_conditional[config.model.type](model, x_forget, t, c_forget, e_forget, b, cond_drop_prob = 0.) + \
+                   config.training.gamma * loss_registry_conditional[config.model.type](model, x_remember, t, c_remember, e_remember, b, cond_drop_prob = 0.)
+            forgetting_loss = loss.item()
 
-                ewc_loss = 0.
-                for name, param in model.named_parameters():
-                    _loss = fisher_dict[name].to(self.device) * (param - params_mle_dict[name].to(self.device)) ** 2
-                    loss += config.training.lmbda * _loss.sum()
-                    ewc_loss += config.training.lmbda * _loss.sum()
+            ewc_loss = 0.
+            for name, param in model.named_parameters():
+                _loss = fisher_dict[name].to(self.device) * (param - params_mle_dict[name].to(self.device)) ** 2
+                loss += config.training.lmbda * _loss.sum()
+                ewc_loss += config.training.lmbda * _loss.sum()
 
-                optimizer.zero_grad()
-                loss.backward()
-                try:
-                    torch.nn.utils.clip_grad_norm_(
-                        model.parameters(), config.optim.grad_clip
-                    )
-                except Exception:
-                    pass
-                optimizer.step()
+            if (step+1) % config.training.log_freq == 0:
+                logging.info(
+                    f"step: {step}, loss: {loss.item()}, forgetting loss: {forgetting_loss}, ewc loss: {ewc_loss}"
+                )
 
-                if self.config.model.ema:
-                    ema_helper.update(model)
+            optimizer.zero_grad()
+            loss.backward()
 
-                if (step+1) % config.training.log_freq == 0:
-                    logging.info(
-                        f"step: {step}, loss: {loss.item()}, forgetting loss: {forgetting_loss}, ewc loss: {ewc_loss}"
-                    )
+            try:
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), config.optim.grad_clip
+                )
+            except Exception:
+                pass
 
-            if (step_+1) % config.training.snapshot_freq == 0:
+            optimizer.step()
+
+            if self.config.model.ema:
+                ema_helper.update(model)
+
+            if (step+1) % config.training.snapshot_freq == 0:
                 states = [
                     model.state_dict(),
                     optimizer.state_dict(),
                     #epoch,
-                    step_,
+                    step,
                 ]
                 if config.model.ema:
                     states.append(ema_helper.state_dict())
 
                 torch.save(
                     states,
-                    os.path.join(config.ckpt_dir, "ckpt.pth"),
+                    os.path.join(config.ckpt_dir, f"ckpt_{step+1}.pth"),
                 )
                 #torch.save(states, os.path.join(self.config.ckpt_dir, "ckpt_latest.pth"))
 
+            if (step > 10000) and ((step+1) % 2000 == 0):
                 test_model = ema_helper.ema_copy(model) if config.model.ema else copy.deepcopy(model)
                 test_model.eval()
-                self.sample_visualization(test_model, step_, args.cond_scale)
+                self.sample_visualization(test_model, step, args.cond_scale)
                 del test_model
 
-        states = [
-            model.state_dict(),
-            optimizer.state_dict(),
-            step_,
-        ]
-        if config.model.ema:
-            states.append(ema_helper.state_dict())
 
-        torch.save(
-            states,
-            os.path.join(config.ckpt_dir, "ckpt_latest.pth"),
-        )
-
-    def train_erasediff(self):
+    # EraseDiff
+    def train_ours(self):
 
         args, config = self.args, self.config
         logging.info(f"Training diffusion forget with EraseDiff.")
@@ -745,6 +741,9 @@ class Diffusion(object):
                     for batch_idx, (unl_imgs, unl_labs) in enumerate(trainloader_unl):
                         x_0 = unl_imgs.to(self.device)
                         y_t = unl_labs.to(self.device)
+                        x_0 = data_transform(config, x_0) #######
+
+                        # Sample normal noise to add to the images
                         noise = torch.rand_like(x_0).to(self.device)
                         n = x_0.size(0)
                         b = self.betas
@@ -767,15 +766,17 @@ class Diffusion(object):
                 # Update \theta_{i+1}
                 num = 0
                 for data_r, data_u in zip_longest(trainloader_rem, trainloader_unl):
-                    if data_u is None:
+                    if data_u is None or data_r is None:
                         break
                     else:
                         images_r, labels_r = data_r
                         images_r, labels_r = images_r.to(self.device), labels_r.to(self.device)
                         images_u, labels_u = data_u
                         images_u, labels_u = images_u.to(self.device), labels_u.to(self.device)
+                        images_r = data_transform(config, images_r) #######
+                        images_u = data_transform(config, images_u) #######
 
-                        noise_r = torch.randn_like(images_r).to(self.device)
+                        noise_r = torch.randn_like(images_r).to(self.device) # Gaussian noise
                         noise_u = torch.rand_like(images_u).to(self.device)
                         n = images_r.size(0)
                         n_u = images_u.size(0)
@@ -828,6 +829,7 @@ class Diffusion(object):
                         else:
                             lambda_bome = args.lambda_bome
                             # print(f'lambda_bome {lambda_bome}')
+                            # lambda_bome = args.lambda_bome if step < 150 else 1.0
 
                         # [4] Update the model parameters # line 3 in Algorithm 1 (BOME!)
                         loss = loss_dr + lambda_bome * loss_q
@@ -847,7 +849,7 @@ class Diffusion(object):
 
                         step += 1
                         num += n
-                    if num > 8191:
+                    if num > args.rem_num:
                         break
 
                     # print(f'step: {step}, unl_loss: {unl_losses.avg.detach():.4f}, loss_du: {loss_du:.4f}, loss_q: {loss_q:.4f}, loss_dr: {loss_dr:.4f}, loss: {loss:.4f}')
@@ -856,7 +858,7 @@ class Diffusion(object):
                             f"step: {step}, unl_loss: {unl_losses.avg.detach():.4f}, loss_du: {loss_du:.4f}, loss_q: {loss_q:.4f}, loss_dr: {loss_dr:.4f}, loss: {loss:.4f}"
                         )
 
-                    if (step+1) % config.training.snapshot_freq == 0:
+                    if (step > 100) and ((step+1) % config.training.snapshot_freq == 0):
                         states = [
                             model.state_dict(),
                             optimizer.state_dict(),
@@ -870,8 +872,430 @@ class Diffusion(object):
                             os.path.join(config.ckpt_dir, f"ckpt_{step+1}.pth"),
                         )
 
+                    if (step > 100) and((step+1) % 20 == 0):
                         test_model = ema_helper.ema_copy(model) if config.model.ema else copy.deepcopy(model)
                         test_model.eval()
                         self.sample_visualization(test_model, step, args.cond_scale)
                         del test_model
+
+        states = [
+            model.state_dict(),
+            optimizer.state_dict(),
+            epoch,
+        ]
+        if config.model.ema:
+            states.append(ema_helper.state_dict())
+
+        torch.save(
+            states,
+            os.path.join(config.ckpt_dir, f"ckpt_latest.pth"),
+        )
+
+        test_model = ema_helper.ema_copy(model) if config.model.ema else copy.deepcopy(model)
+        test_model.eval()
+        self.sample_visualization(test_model, step, args.cond_scale)
+        del test_model
+
+
+    # Fine-tune
+    def train_ft(self):
+        args, config = self.args, self.config
+        logging.info(f"Training diffusion forget with Fine-tune.")
+
+        # Dataset
+        _, _, trainloader_rem, _, _ = load_data(args)
+        # trainloader_rem = all_but_one_class_path_dataset(config, os.path.join(args.ckpt_folder, "class_samples"), args.label_to_forget)
+        D_train_iter = cycle(trainloader_rem)
+
+        print("Loading checkpoints {}".format(args.ckpt_folder))
+        model = Conditional_Model(config)
+        print(f"Number of parameters: {count_parameters(model)//1e6:.2f}M")
+        states = torch.load(os.path.join(args.ckpt_folder, "ckpts/cifar10_ddpm.pth"), map_location=self.device,)
+        model = model.to(self.device)
+        model = torch.nn.DataParallel(model)
+        model.load_state_dict(states[0], strict=True)
+        optimizer = get_optimizer(config, model.parameters())
+
+        if self.config.model.ema:
+            ema_helper = EMAHelper(mu=config.model.ema_rate)
+            ema_helper.register(model)
+            ema_helper.load_state_dict(states[-1])
+        else:
+            ema_helper = None
+
+        start = time.time()
+        for step in range(0, self.config.training.n_iters):
+
+            model.train()
+            x, c = next(D_train_iter)
+            n = x.size(0)
+            x = x.to(self.device)
+            x = data_transform(self.config, x)
+            e = torch.randn_like(x)
+            b = self.betas
+
+            # antithetic sampling
+            t = torch.randint(
+                low=0, high=self.num_timesteps, size=(n // 2 + 1,)
+            ).to(self.device)
+            t = torch.cat([t, self.num_timesteps - t - 1], dim=0)[:n]
+            loss = loss_registry_conditional[config.model.type](model, x, t, c, e, b)
+
+            if (step+1) % self.config.training.log_freq  == 0:
+                end = time.time()
+                logging.info(
+                    f"step: {step}, loss: {loss.item()}, time: {end-start}"
+                )
+                start = time.time()
+
+            optimizer.zero_grad()
+            loss.backward()
+
+            try:
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), config.optim.grad_clip
+                )
+            except Exception:
+                pass
+            optimizer.step()
+
+            if self.config.model.ema:
+                ema_helper.update(model)
+
+            if (step+1) % self.config.training.snapshot_freq == 0:
+                states = [
+                    model.state_dict(),
+                    optimizer.state_dict(),
+                    step,
+                ]
+                if self.config.model.ema:
+                    states.append(ema_helper.state_dict())
+
+                torch.save(
+                    states,
+                    os.path.join(config.ckpt_dir, f"ckpt_{step+1}.pth"),
+                )
+
+            if (step > 10000) and ((step+1) % 2000 == 0):
+                test_model = ema_helper.ema_copy(model) if config.model.ema else copy.deepcopy(model)
+                test_model.eval()
+                self.sample_visualization(test_model, step, args.cond_scale)
+                del test_model
+
+
+    # NegGrad
+    def train_ng(self):
+        args, config = self.args, self.config
+        logging.info(f"Training diffusion forget with NegGrad.")
+
+        # Dataset
+        _, _, trainloader_rem, _, _ = load_data(args)
+        # trainloader_rem = all_but_one_class_path_dataset(config, os.path.join(args.ckpt_folder, "class_samples"), args.label_to_forget)
+        D_train_iter = cycle(trainloader_rem)
+
+        print("Loading checkpoints {}".format(args.ckpt_folder))
+        model = Conditional_Model(config)
+        print(f"Number of parameters: {count_parameters(model)//1e6:.2f}M")
+        states = torch.load(os.path.join(args.ckpt_folder, "ckpts/cifar10_ddpm.pth"), map_location=self.device,)
+        model = model.to(self.device)
+        model = torch.nn.DataParallel(model)
+        model.load_state_dict(states[0], strict=True)
+        optimizer = get_optimizer(config, model.parameters())
+
+        if self.config.model.ema:
+            ema_helper = EMAHelper(mu=config.model.ema_rate)
+            ema_helper.register(model)
+            ema_helper.load_state_dict(states[-1])
+        else:
+            ema_helper = None
+
+        start = time.time()
+        for step in range(0, self.config.training.n_iters):
+
+            model.train()
+            x, c = next(D_train_iter)
+            n = x.size(0)
+            x = x.to(self.device)
+            x = data_transform(self.config, x)
+            e = torch.randn_like(x)
+            b = self.betas
+
+            # antithetic sampling
+            t = torch.randint(
+                low=0, high=self.num_timesteps, size=(n // 2 + 1,)
+            ).to(self.device)
+            t = torch.cat([t, self.num_timesteps - t - 1], dim=0)[:n]
+            loss = -loss_registry_conditional[config.model.type](model, x, t, c, e, b)
+
+            if (step+1) % self.config.training.log_freq  == 0:
+                end = time.time()
+                logging.info(
+                    f"step: {step}, loss: {loss.item()}, time: {end-start}"
+                )
+                start = time.time()
+
+            optimizer.zero_grad()
+            loss.backward()
+
+            try:
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), config.optim.grad_clip
+                )
+            except Exception:
+                pass
+            optimizer.step()
+
+            if self.config.model.ema:
+                ema_helper.update(model)
+
+            if (step+1) % self.config.training.snapshot_freq == 0:
+                states = [
+                    model.state_dict(),
+                    optimizer.state_dict(),
+                    step,
+                ]
+                if self.config.model.ema:
+                    states.append(ema_helper.state_dict())
+
+                torch.save(
+                    states,
+                    os.path.join(config.ckpt_dir, f"ckpt_{step+1}.pth"),
+                )
+
+            if (step > 100) and ((step+1) % 100 == 0):
+                test_model = ema_helper.ema_copy(model) if config.model.ema else copy.deepcopy(model)
+                test_model.eval()
+                self.sample_visualization(test_model, step, args.cond_scale)
+                del test_model
+
+
+    # BlindSpot
+    def attention(self, x):
+            """
+            Taken from https://github.com/szagoruyko/attention-transfer
+            :param x = activations
+            """
+            return torch.nn.functional.normalize(x.pow(2).mean(1).view(x.size(0), -1))
+
+    def attention_diff(self, x, y):
+        """
+        Taken from https://github.com/szagoruyko/attention-transfer
+        :param x = activations
+        :param y = activations
+        """
+        return (self.attention(x) - self.attention(y)).pow(2).mean()
+
+    def forget_loss(self, model_output, model_activations, proxy_output, proxy_activations, mask, AT_beta = 50):
+
+        loss = torch.nn.functional.mse_loss(model_output, proxy_output)
+        if AT_beta > 0:
+            at_loss = 0
+            for i in range(len(proxy_activations)):
+                at_loss = at_loss + AT_beta * self.attention_diff(model_activations[i], proxy_activations[i])
+        else:
+            at_loss = 0
+
+        # print(f'loss: {loss}, at_loss: {at_loss}, 10*at_loss: {10. * at_loss}')
+        total_loss = loss + at_loss
+
+        return total_loss
+
+    def train_blindspot(self):
+        args, config = self.args, self.config
+        logging.info(f"Training diffusion forget with BlindSpot.")
+
+        # Dataset
+        _, trainloader_all, trainloader_rem, _, _ = load_data(args)
+        # trainloader_rem = all_but_one_class_path_dataset(config, os.path.join(args.ckpt_folder, "class_samples"), args.label_to_forget)
+        D_train_iter = cycle(trainloader_rem)
+        D_all_iter = cycle(trainloader_all)
+
+        # first stage: proxy model
+        print("Loading checkpoints {}".format(args.ckpt_folder))
+        proxy_model = Conditional_Model(config)
+        print(f"Number of parameters: {count_parameters(proxy_model)//1e6:.2f}M")
+        states = torch.load(os.path.join(args.ckpt_folder, "ckpts/cifar10_ddpm.pth"), map_location=self.device,)
+        proxy_model = proxy_model.to(self.device)
+        proxy_model = torch.nn.DataParallel(proxy_model)
+        proxy_model.load_state_dict(states[0], strict=True)
+        optimizer = get_optimizer(config, proxy_model.parameters())
+        #
+        if self.config.model.ema:
+            ema_helper = EMAHelper(mu=config.model.ema_rate)
+            ema_helper.register(proxy_model)
+            ema_helper.load_state_dict(states[-1])
+        else:
+            ema_helper = None
+        #
+        st_step = 0
+        start = time.time()
+        for step in range(0, self.config.training.n_iters_proxy):
+
+            proxy_model.train()
+            x, c = next(D_train_iter)
+            n = x.size(0)
+            x = x.to(self.device)
+            x = data_transform(self.config, x)
+            e = torch.randn_like(x)
+            b = self.betas
+
+            # antithetic sampling
+            t = torch.randint(
+                low=0, high=self.num_timesteps, size=(n // 2 + 1,)
+            ).to(self.device)
+            t = torch.cat([t, self.num_timesteps - t - 1], dim=0)[:n]
+            loss = loss_registry_conditional[config.model.type](proxy_model, x, t, c, e, b)
+
+            if (step+1) % self.config.training.log_freq  == 0:
+                end = time.time()
+                logging.info(
+                    f"[proxy] step: {step}, loss: {loss.item()}, time: {end-start}"
+                )
+                start = time.time()
+
+            optimizer.zero_grad()
+            loss.backward()
+
+            try:
+                torch.nn.utils.clip_grad_norm_(
+                    proxy_model.parameters(), config.optim.grad_clip
+                )
+            except Exception:
+                pass
+            optimizer.step()
+
+            if self.config.model.ema:
+                ema_helper.update(proxy_model)
+
+            if (step+1) == self.config.training.n_iters_proxy:
+                states = [
+                    proxy_model.state_dict(),
+                    optimizer.state_dict(),
+                    step,
+                ]
+                if self.config.model.ema:
+                    states.append(ema_helper.state_dict())
+
+                torch.save(
+                    states,
+                    os.path.join(config.ckpt_dir, f"proxy_ckpt_{step+1}.pth"),
+                )
+
+                test_model = ema_helper.ema_copy(proxy_model) if config.model.ema else copy.deepcopy(proxy_model)
+                test_model.eval()
+                self.sample_visualization(test_model, step, args.cond_scale)
+                del test_model
+
+            st_step = step
+
+        proxy_model = ema_helper.ema_copy(proxy_model) if config.model.ema else copy.deepcopy(proxy_model)
+        del ema_helper
+        proxy_model.eval()
+
+        # st_step = 10000
+        # print("Loading proxy_model")
+        # proxy_model = Conditional_Model(config)
+        # print(f"Number of parameters: {count_parameters(proxy_model)//1e6:.2f}M")
+        # states = torch.load(os.path.join(args.ckpt_folder, "ckpts/proxy_ckpt_10000.pth"), map_location=self.device,)
+        # proxy_model = proxy_model.to(self.device)
+        # proxy_model = torch.nn.DataParallel(proxy_model)
+        # proxy_model.load_state_dict(states[0], strict=True)
+        # proxy_model.eval()
+
+        # second stage: perform unlearning using the proxy model and the original model
+        model = Conditional_Model(config)
+        print(f"Number of parameters: {count_parameters(model)//1e6:.2f}M")
+        states = torch.load(os.path.join(args.ckpt_folder, "ckpts/cifar10_ddpm.pth"), map_location=self.device,)
+        model = model.to(self.device)
+        model = torch.nn.DataParallel(model)
+        model.load_state_dict(states[0], strict=True)
+        optimizer = get_optimizer(config, model.parameters())
+
+        if self.config.model.ema:
+            ema_helper = EMAHelper(mu=config.model.ema_rate)
+            ema_helper.register(model)
+            ema_helper.load_state_dict(states[-1])
+        else:
+            ema_helper = None
+
+        start = time.time()
+        for step in range(st_step, self.config.training.n_iters):
+
+            model.train()
+            x, c = next(D_all_iter)
+            n = x.size(0)
+            x = x.to(self.device) # Bx3x32x32
+
+            # Assign mask 1 to unlearned images, mask 0 to remaining images
+            mask = torch.zeros_like(c)
+            mask = mask + (c == args.label_to_forget) # B
+
+            x = data_transform(self.config, x)
+            e = torch.randn_like(x) # Bx3x32x32
+            b = self.betas # T
+
+            # antithetic sampling
+            t = torch.randint(
+                low=0, high=self.num_timesteps, size=(n // 2 + 1,)
+            ).to(self.device)
+            t = torch.cat([t, self.num_timesteps - t - 1], dim=0)[:n] # B
+
+            # loss = loss_registry_conditional[config.model.type](model, x, t, c, e, b)
+            a = (1-b).cumprod(dim=0).index_select(0, t).view(-1, 1, 1, 1)
+            x1 = x * a.sqrt() + e * (1.0 - a).sqrt()
+            model_output = model(x1, t.float(), c, cond_drop_prob = 0.1, mode='train')
+            remain_loss = 0.
+            if mask.sum() < n:
+                remain_loss = torch.nn.functional.mse_loss(model_output[mask==0], e[mask==0])
+            proxy_loss = 0.
+            if mask.sum() > 0:
+                with torch.no_grad():
+                    a = (1-b).cumprod(dim=0).index_select(0, t[mask==1]).view(-1, 1, 1, 1)
+                    x2 = x[mask==1] * a.sqrt() + e[mask==1] * (1.0 - a).sqrt()
+                    proxy_output = model(x2, t[mask==1].float(), c[mask==1], cond_drop_prob = 0.1, mode='train')
+                # print(model_output[mask==1].shape, proxy_output.shape, mask.sum())
+                proxy_loss = self.forget_loss(model_output[mask==1], None, proxy_output, None, mask, 0.)
+            coeff = mask.sum()/n
+            loss = coeff*proxy_loss + (1-coeff)*remain_loss
+
+            if (step+1) % self.config.training.log_freq  == 0:
+                end = time.time()
+                logging.info(
+                    f"Step: {step}, loss: {loss.item()}, time: {end-start}"
+                )
+                start = time.time()
+
+            optimizer.zero_grad()
+            loss.backward()
+
+            try:
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), config.optim.grad_clip
+                )
+            except Exception:
+                pass
+            optimizer.step()
+
+            if self.config.model.ema:
+                ema_helper.update(model)
+
+            if (step+1) % self.config.training.snapshot_freq == 0:
+                states = [
+                    model.state_dict(),
+                    optimizer.state_dict(),
+                    step,
+                ]
+                if self.config.model.ema:
+                    states.append(ema_helper.state_dict())
+
+                torch.save(
+                    states,
+                    os.path.join(config.ckpt_dir, f"ckpt_{step+1}.pth"),
+                )
+
+            if (step > (10000 + st_step)) and ((step+1) % 2000 == 0):
+                test_model = ema_helper.ema_copy(model) if config.model.ema else copy.deepcopy(model)
+                test_model.eval()
+                self.sample_visualization(test_model, step, args.cond_scale)
+                del test_model
 
