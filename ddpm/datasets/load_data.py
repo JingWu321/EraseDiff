@@ -21,12 +21,12 @@ def load_data(args):
         transforms.Resize((32, 32)),
         transforms.RandomHorizontalFlip(p=0.5),
         transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        # transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
     ])
     test_transform = transforms.Compose([
         transforms.Resize((32, 32)),
         transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        # transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
     ])
     unl_clses = getUnlDevNum(args.unl_cls)
     rem_clses = list(set(range(0, num_classes)) - set(unl_clses))
@@ -55,6 +55,5 @@ def load_data(args):
 
     num_examples = {"trainset_all": len(trainset_all), "trainset_rem": len(trainset_rem), "trainset_unl": len(trainset_unl)}
     return num_classes, trainloader_all, trainloader_rem, trainloader_unl, num_examples
-
 
 
