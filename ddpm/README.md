@@ -1,5 +1,5 @@
 # EraseDiff for DDPMs
-This is the official repository for EraseDiff for diffusion models. The code structure of this project is adapted from the [DDIM](https://github.com/ermongroup/ddim) and [SA](https://github.com/clear-nus/selective-amnesia/tree/a7a27ab573ba3be77af9e7aae4a3095da9b136ac/ddpm) codebase.
+This is the official repository for EraseDiff for diffusion models. The code structure of this project is adapted from the [DDIM](https://github.com/ermongroup/ddim), [SA](https://github.com/clear-nus/selective-amnesia/tree/a7a27ab573ba3be77af9e7aae4a3095da9b136ac/ddpm), and [SalUn](https://github.com/OPTML-Group/Unlearn-Saliency/tree/master/DDPM) codebases.
 
 # Requirements
 Install the requirements using a `conda` environment:
