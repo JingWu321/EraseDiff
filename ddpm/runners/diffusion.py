@@ -897,6 +897,258 @@ class Diffusion(object):
         del test_model
 
 
+    # SalUn
+    def generate_mask(self):
+        args, config = self.args, self.config
+        logging.info(f"Generating mask of diffusion to achieve gradient sparsity.")
+
+        # _, D_forget_loader = get_forget_dataset(args, config, args.label_to_forget)
+        _, _, _, D_forget_loader, _ = load_data(args)
+
+        print("Loading checkpoints {}".format(args.ckpt_folder))
+        model = Conditional_Model(config)
+        print(f"Number of parameters: {count_parameters(model)//1e6:.2f}M")
+        states = torch.load(
+            os.path.join(args.ckpt_folder, "ckpts/cifar10_ddpm.pth"),
+            map_location=self.device,
+        )
+        model = model.to(self.device)
+        model = torch.nn.DataParallel(model)
+        model.load_state_dict(states[0], strict=True)
+
+        optimizer = get_optimizer(config, model.parameters())
+
+        gradients = {}
+        for name, param in model.named_parameters():
+            gradients[name] = 0
+
+        model.eval()
+
+        for x, forget_c in D_forget_loader:
+            n = x.size(0)
+            x = x.to(self.device)
+            x = data_transform(self.config, x)
+            e = torch.randn_like(x)
+            b = self.betas
+
+            # antithetic sampling
+            t = torch.randint(low=0, high=self.num_timesteps, size=(n // 2 + 1,)).to(
+                self.device
+            )
+            t = torch.cat([t, self.num_timesteps - t - 1], dim=0)[:n]
+
+            # loss 1
+            a = (1 - b).cumprod(dim=0).index_select(0, t).view(-1, 1, 1, 1)
+            x = x * a.sqrt() + e * (1.0 - a).sqrt()
+            output = model(
+                x, t.float(), forget_c, cond_scale=args.cond_scale, mode="test"
+            )
+
+            # https://github.com/clear-nus/selective-amnesia/blob/a7a27ab573ba3be77af9e7aae4a3095da9b136ac/ddpm/models/diffusion.py#L338
+            loss = (e - output).square().sum(dim=(1, 2, 3)).mean(dim=0)
+
+            optimizer.zero_grad()
+            loss.backward()
+
+            try:
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), config.optim.grad_clip
+                )
+            except Exception:
+                pass
+
+            with torch.no_grad():
+                for name, param in model.named_parameters():
+                    if param.grad is not None:
+                        gradient = param.grad.data.cpu()
+                        gradients[name] += gradient
+
+        with torch.no_grad():
+
+            for name in gradients:
+                gradients[name] = torch.abs_(gradients[name])
+
+            mask_path = os.path.join('results/cifar10/mask', str(args.label_to_forget))
+            os.makedirs(mask_path, exist_ok=True)
+
+            threshold_list = [0.5]
+            for i in threshold_list:
+                print(i)
+                sorted_dict_positions = {}
+                hard_dict = {}
+
+                # Concatenate all tensors into a single tensor
+                all_elements = - torch.cat(
+                    [tensor.flatten() for tensor in gradients.values()]
+                )
+
+                # Calculate the threshold index for the top 10% elements
+                threshold_index = int(len(all_elements) * i)
+
+                # Calculate positions of all elements
+                positions = torch.argsort(all_elements)
+                ranks = torch.argsort(positions)
+
+                start_index = 0
+                for key, tensor in gradients.items():
+                    num_elements = tensor.numel()
+                    tensor_ranks = ranks[start_index : start_index + num_elements]
+
+                    sorted_positions = tensor_ranks.reshape(tensor.shape)
+                    sorted_dict_positions[key] = sorted_positions
+
+                    # Set the corresponding elements to 1
+                    threshold_tensor = torch.zeros_like(tensor_ranks)
+                    threshold_tensor[tensor_ranks < threshold_index] = 1
+                    threshold_tensor = threshold_tensor.reshape(tensor.shape)
+                    hard_dict[key] = threshold_tensor
+                    start_index += num_elements
+
+                torch.save(hard_dict, os.path.join(mask_path, f'with_{str(i)}.pt'))
+
+    def saliency_unlearn(self):
+        args, config = self.args, self.config
+
+        # D_remain_loader, D_forget_loader = get_forget_dataset(
+        #     args, config, args.label_to_forget
+        # )
+        _, _, D_remain_loader, D_forget_loader, _ = load_data(args)
+        D_remain_iter = cycle(D_remain_loader)
+        D_forget_iter = cycle(D_forget_loader)
+
+        if args.mask_path:
+            mask = torch.load(args.mask_path)
+        else:
+            mask = None
+
+        print("Loading checkpoints {}".format(args.ckpt_folder))
+
+        model = Conditional_Model(config)
+        states = torch.load(
+            os.path.join(args.ckpt_folder, "ckpts/cifar10_ddpm.pth"),
+            map_location=self.device,
+        )
+        model = model.to(self.device)
+        model = torch.nn.DataParallel(model)
+        model.load_state_dict(states[0], strict=True)
+        optimizer = get_optimizer(config, model.parameters())
+        criteria = torch.nn.MSELoss()
+
+        if self.config.model.ema:
+            ema_helper = EMAHelper(mu=config.model.ema_rate)
+            ema_helper.register(model)
+            ema_helper.load_state_dict(states[-1])
+            # model = ema_helper.ema_copy(model_no_ema)
+        else:
+            ema_helper = None
+
+        model.train()
+        start = time.time()
+        for step in range(0, self.config.training.n_iters):
+            model.train()
+
+            # remain stage
+            remain_x, remain_c = next(D_remain_iter)
+            n = remain_x.size(0)
+            remain_x = remain_x.to(self.device)
+            remain_x = data_transform(self.config, remain_x)
+            e = torch.randn_like(remain_x)
+            b = self.betas
+
+            t = torch.randint(low=0, high=self.num_timesteps, size=(n // 2 + 1,)).to(
+                self.device
+            )
+            t = torch.cat([t, self.num_timesteps - t - 1], dim=0)[:n]
+            remain_loss = loss_registry_conditional[config.model.type](
+                model, remain_x, t, remain_c, e, b
+            )
+
+            # forget stage
+            forget_x, forget_c = next(D_forget_iter)
+
+            n = forget_x.size(0)
+            forget_x = forget_x.to(self.device)
+            forget_x = data_transform(self.config, forget_x)
+            e = torch.randn_like(forget_x)
+            b = self.betas
+
+            t = torch.randint(low=0, high=self.num_timesteps, size=(n // 2 + 1,)).to(
+                self.device
+            )
+            t = torch.cat([t, self.num_timesteps - t - 1], dim=0)[:n]
+
+            if args.method == "ga":
+                forget_loss = -loss_registry_conditional[config.model.type](
+                    model, forget_x, t, forget_c, e, b
+                )
+
+            else:
+                a = (1 - b).cumprod(dim=0).index_select(0, t).view(-1, 1, 1, 1)
+                forget_x = forget_x * a.sqrt() + e * (1.0 - a).sqrt()
+
+                output = model(forget_x, t.float(), forget_c, mode="train")
+
+                if args.method == "rl":
+                    pseudo_c = torch.full(
+                        forget_c.shape,
+                        (args.label_to_forget + 1) % 10,
+                        device=forget_c.device,
+                    )
+                    pseudo = model(forget_x, t.float(), pseudo_c, mode="train").detach()
+                    forget_loss = criteria(pseudo, output)
+
+            loss = forget_loss + args.alpha * remain_loss
+
+            if (step + 1) % self.config.training.log_freq == 0:
+                end = time.time()
+                logging.info(f"step: {step}, loss: {loss.item()}, time: {end-start}")
+                start = time.time()
+
+            optimizer.zero_grad()
+            loss.backward()
+
+            try:
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), config.optim.grad_clip
+                )
+            except Exception:
+                pass
+
+            if mask:
+                for name, param in model.named_parameters():
+                    if param.grad is not None:
+                        param.grad *= mask[name].to(param.grad.device)
+            optimizer.step()
+
+            if self.config.model.ema:
+                ema_helper.update(model)
+
+            if (step + 1) % self.config.training.snapshot_freq == 0:
+                states = [
+                    model.state_dict(),
+                    optimizer.state_dict(),
+                    step,
+                ]
+                if self.config.model.ema:
+                    states.append(ema_helper.state_dict())
+
+                torch.save(
+                    states,
+                    # os.path.join(self.config.ckpt_dir, "ckpt.pth"),
+                    os.path.join(self.config.ckpt_dir, f"ckpt_{step+1}.pth"),
+                )
+
+            if (step+1) % 100 == 0:
+                test_model = (
+                    ema_helper.ema_copy(model)
+                    if self.config.model.ema
+                    else copy.deepcopy(model)
+                )
+                test_model.eval()
+                self.sample_visualization(test_model, step, args.cond_scale)
+                del test_model
+
+
     # Fine-tune
     def train_ft(self):
         args, config = self.args, self.config
