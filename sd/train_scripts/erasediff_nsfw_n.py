@@ -135,7 +135,7 @@ def erasediff(
         name = f"compvis-nsfw-noiseN-method_{train_method}-Ksteps_{K_steps}-lambdabome_{lambda_bome}-lr_{lr}"
 
     # NSFW Removal
-    word_wear = "a photo of a person wearing clothes"
+    # word_wear = "a photo of a person wearing clothes"
     word_print = 'nsfw'.replace(" ", "")
 
     # TRAINING CODE
@@ -157,17 +157,29 @@ def erasediff(
                         forget_batch, model.first_stage_key
                     )
 
+                    # pseudo_prompts = [word_wear] * forget_batch['jpg'].size(0)
+                    # pseudo_batch = {
+                    #     "jpg": forget_batch['jpg'],
+                    #     "txt": pseudo_prompts,
+                    # }
+                    # pseudo_input, pseudo_emb = model.get_input(
+                    #     pseudo_batch, model.first_stage_key
+                    # )
+
                     t = torch.randint(
                         0,
                         model.num_timesteps,
                         (forget_input.shape[0],),
                         device=model.device,
                     ).long()
-                    noise = torch.rand_like(forget_input, device=model.device)
+                    noise = torch.randn_like(forget_input, device=model.device)
+                    normal_noise = torch.rand_like(forget_input, device=model.device) # normal noise
                     forget_noisy = model.q_sample(x_start=forget_input, t=t, noise=noise)
                     forget_out = model.apply_model(forget_noisy, t, forget_emb)
+                    # pseudo_noisy = model.q_sample(x_start=pseudo_input, t=t, noise=noise)
+                    # pseudo_out = model.apply_model(pseudo_noisy, t, pseudo_emb).detach()
 
-                    forget_loss = criteria(forget_out, noise)
+                    forget_loss = criteria(forget_out, normal_noise)
                     forget_loss.backward()
                     if mask_path:
                         for n, p in model.named_parameters():
@@ -193,10 +205,21 @@ def erasediff(
                     forget_batch = next(iter(forget_dl))
                     remain_batch = next(iter(remain_dl))
 
+                    # remain stage
                     loss_dr = model.shared_step(remain_batch)[0]
+
+                    # forget stage
                     forget_input, forget_emb = model.get_input(
                         forget_batch, model.first_stage_key
                     )
+                    # pseudo_prompts = [word_wear] * forget_batch['jpg'].size(0)
+                    # pseudo_batch = {
+                    #     "jpg": forget_batch['jpg'],
+                    #     "txt": pseudo_prompts,
+                    # }
+                    # pseudo_input, pseudo_emb = model.get_input(
+                    #     pseudo_batch, model.first_stage_key
+                    # )
 
                     t = torch.randint(
                         0,
@@ -204,15 +227,55 @@ def erasediff(
                         (forget_input.shape[0],),
                         device=model.device,
                     ).long()
-                    noise = torch.rand_like(forget_input, device=model.device)
+                    noise = torch.randn_like(forget_input, device=model.device)
+                    normal_noise = torch.rand_like(forget_input, device=model.device) # normal noise
 
                     forget_noisy = model.q_sample(x_start=forget_input, t=t, noise=noise)
                     forget_out = model.apply_model(forget_noisy, t, forget_emb)
-                    loss_du = criteria(forget_out, noise)
+                    # pseudo_noisy = model.q_sample(x_start=pseudo_input, t=t, noise=noise)
+                    # pseudo_out = model.apply_model(pseudo_noisy, t, pseudo_emb).detach()
+
+                    loss_du = criteria(forget_out, normal_noise)
 
                     loss_q = loss_du - unl_losses.avg.detach()  # line 2 in Algorithm 1 (BOME!)
                     # [3] Get lambda_bome
-                    # TODO
+                    if args.lambda_bome < 0:
+                        optimizer.zero_grad()
+                        q_grads = torch.autograd.grad(loss_q, model.parameters(), retain_graph=True)
+                        torch.cuda.empty_cache()
+                        gc.collect()
+                        q_grad_vector = torch.stack(list(map(lambda q_grad: torch.cat(list(map(lambda grad: grad.contiguous().view(-1), q_grad))), [q_grads])))
+                        torch.cuda.empty_cache()
+                        gc.collect()
+                        q_grad_norm = torch.linalg.norm(q_grad_vector, 2)
+                        torch.cuda.empty_cache()
+                        gc.collect()
+                        if q_grad_norm == 0:
+                            lambda_bome = 0.
+                        else:
+                            # compute the gradient of the loss_dr w.r.t. the model parameters
+                            optimizer.zero_grad()
+                            dr_grads = torch.autograd.grad(loss_dr, model.parameters(), retain_graph=True)
+                            torch.cuda.empty_cache()
+                            gc.collect()
+                            # similarity between dr_grads_vector and q_grad_vector
+                            # compute the inner product of the gradient of dr_grads and q_grads
+                            dr_grads_vector = torch.stack(list(map(lambda dr_grad: torch.cat(list(map(lambda grad: grad.contiguous().view(-1), dr_grad))), [dr_grads])))
+                            dr_grad_norm = torch.linalg.norm(dr_grads_vector, 2)
+                            torch.cuda.empty_cache()
+                            gc.collect()
+                            inner_product = torch.sum(dr_grads_vector * q_grad_vector)
+                            tmp = inner_product / ( dr_grad_norm * q_grad_norm + 1e-8)
+                            # tmp = inner_product / (q_grad_norm + 1e-8) # original verison in BOME!
+                            # compute the lambda_bome
+                            lambda_bome = (args.eta_bome - tmp).detach() if args.eta_bome > tmp else 0.
+                            print(f'lambda_bome {lambda_bome}, tmp {tmp}')
+                            torch.cuda.empty_cache()
+                            gc.collect()
+                            del dr_grads, dr_grads_vector, tmp
+                        del q_grads, q_grad_vector, q_grad_norm
+                    else:
+                        lambda_bome = args.lambda_bome
 
                     # [4] Update the model parameters # line 3 in Algorithm 1 (BOME!)
                     loss = loss_dr + lambda_bome * loss_q
@@ -227,7 +290,7 @@ def erasediff(
                                 print(n)
                     optimizer.step()
                     step += 1
-                    if (step+1) % 20 == 0:
+                    if (step+1) % 10 == 0:
                         print(f"step: {i}, unl_loss: {unl_losses.avg.detach():.4f}, loss_du: {loss_du:.4f}, loss_q: {loss_q:.4f}, loss_dr: {loss_dr:.4f}, loss: {loss:.4f}")
                         save_history(losses, name, word_print)
                         model.eval()
@@ -317,6 +380,12 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--lambda_bome",
+        type=float,
+        required=False,
+        default=0.1,
+    )
+    parser.add_argument(
+        "--eta_bome",
         type=float,
         required=False,
         default=0.1,
