@@ -135,7 +135,8 @@ def erasediff(
         name = f"compvis-nsfw-method_{train_method}-Ksteps_{K_steps}-lambdabome_{lambda_bome}-lr_{lr}"
 
     # NSFW Removal
-    word_wear = "a photo of a person wearing clothes"
+    # word_wear = "a photo of a person wearing clothes"
+    word_wear = "a photo of a pokemon"
     word_print = 'nsfw'.replace(" ", "")
 
     # TRAINING CODE
@@ -157,13 +158,13 @@ def erasediff(
                         forget_batch, model.first_stage_key
                     )
 
-                    noise_prompts = [word_wear] * forget_batch['jpg'].size(0)
-                    noise_batch = {
+                    pseudo_prompts = [word_wear] * forget_batch['jpg'].size(0)
+                    pseudo_batch = {
                         "jpg": forget_batch['jpg'],
-                        "txt": noise_prompts,
+                        "txt": pseudo_prompts,
                     }
-                    noise_input, noise_emb = model.get_input(
-                        noise_batch, model.first_stage_key
+                    pseudo_input, pseudo_emb = model.get_input(
+                        pseudo_batch, model.first_stage_key
                     )
 
                     t = torch.randint(
@@ -173,12 +174,13 @@ def erasediff(
                         device=model.device,
                     ).long()
                     noise = torch.randn_like(forget_input, device=model.device)
+                    # normal_noise = torch.rand_like(forget_input, device=model.device) # normal noise
                     forget_noisy = model.q_sample(x_start=forget_input, t=t, noise=noise)
                     forget_out = model.apply_model(forget_noisy, t, forget_emb)
-                    noise_noisy = model.q_sample(x_start=noise_input, t=t, noise=noise)
-                    noise_out = model.apply_model(noise_noisy, t, noise_emb).detach()
+                    pseudo_noisy = model.q_sample(x_start=pseudo_input, t=t, noise=noise)
+                    pseudo_out = model.apply_model(pseudo_noisy, t, pseudo_emb).detach()
 
-                    forget_loss = criteria(forget_out, noise_out)
+                    forget_loss = criteria(forget_out, pseudo_out)
                     forget_loss.backward()
                     if mask_path:
                         for n, p in model.named_parameters():
@@ -211,13 +213,13 @@ def erasediff(
                     forget_input, forget_emb = model.get_input(
                         forget_batch, model.first_stage_key
                     )
-                    noise_prompts = [word_wear] * forget_batch['jpg'].size(0)
-                    noise_batch = {
+                    pseudo_prompts = [word_wear] * forget_batch['jpg'].size(0)
+                    pseudo_batch = {
                         "jpg": forget_batch['jpg'],
-                        "txt": noise_prompts,
+                        "txt": pseudo_prompts,
                     }
-                    noise_input, noise_emb = model.get_input(
-                        noise_batch, model.first_stage_key
+                    pseudo_input, pseudo_emb = model.get_input(
+                        pseudo_batch, model.first_stage_key
                     )
 
                     t = torch.randint(
@@ -231,10 +233,10 @@ def erasediff(
 
                     forget_noisy = model.q_sample(x_start=forget_input, t=t, noise=noise)
                     forget_out = model.apply_model(forget_noisy, t, forget_emb)
-                    noise_noisy = model.q_sample(x_start=noise_input, t=t, noise=noise)
-                    noise_out = model.apply_model(noise_noisy, t, noise_emb).detach()
+                    pseudo_noisy = model.q_sample(x_start=pseudo_input, t=t, noise=noise)
+                    pseudo_out = model.apply_model(pseudo_noisy, t, pseudo_emb).detach()
 
-                    loss_du = criteria(forget_out, noise_out)
+                    loss_du = criteria(forget_out, pseudo_out)
 
                     loss_q = loss_du - unl_losses.avg.detach()  # line 2 in Algorithm 1 (BOME!)
                     # [3] Get lambda_bome
@@ -253,7 +255,7 @@ def erasediff(
                                 print(n)
                     optimizer.step()
                     step += 1
-                    if (step+1) % 20 == 0:
+                    if (step+1) % 10 == 0:
                         print(f"step: {i}, unl_loss: {unl_losses.avg.detach():.4f}, loss_du: {loss_du:.4f}, loss_q: {loss_q:.4f}, loss_dr: {loss_dr:.4f}, loss: {loss:.4f}")
                         save_history(losses, name, word_print)
                         model.eval()
