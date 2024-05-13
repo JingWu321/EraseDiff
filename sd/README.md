@@ -59,4 +59,6 @@ BELLY_EXPOSED: 162
 MALE_GENITALIA_EXPOSED: 7
 ```
 
+3. Data used to train and models can be found in [Drive](https://drive.google.com/drive/folders/1GcVcyxSvChVvioB8W8uBYDSlZtubz-LL).
+
 
