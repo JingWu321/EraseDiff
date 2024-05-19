@@ -5,8 +5,8 @@ from time import sleep
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from .convertModels import savemodelDiffusers
-from .dataset import setup_forget_data, setup_model, setup_remain_data
+from train_scripts.convertModels import savemodelDiffusers
+from train_scripts.dataset import setup_forget_data, setup_model, setup_remain_data
 from diffusers import LMSDiscreteScheduler
 from tqdm import tqdm
 
@@ -112,9 +112,9 @@ def erasediff(
     if mask_path:
         mask = torch.load(mask_path)
 
-        name = f"compvis-erasediffRL-mask-class_{str(class_to_forget)}-method_{train_method}-unleps_{unl_eps}-Ksteps_{K_steps}-lambdabome_{lambda_bome}-lr_{lr}"
+        name = f"compvis-erasediff-mask-class_{str(class_to_forget)}-method_{train_method}-unleps_{unl_eps}-Ksteps_{K_steps}-lambdabome_{lambda_bome}-lr_{lr}"
     else:
-        name = f"compvis-erasediffRL-class_{str(class_to_forget)}-method_{train_method}-unleps_{unl_eps}-Ksteps_{K_steps}-lambdabome_{lambda_bome}-lr_{lr}"
+        name = f"compvis-erasediff-class_{str(class_to_forget)}-method_{train_method}-unleps_{unl_eps}-Ksteps_{K_steps}-lambdabome_{lambda_bome}-lr_{lr}"
 
     # TRAINING CODE
     step = 0
@@ -130,8 +130,6 @@ def erasediff(
 
                 forget_images, forget_labels = next(iter(forget_dl))
                 forget_prompts = [descriptions[label] for label in forget_labels]
-                noise_prompts = [descriptions[(int(class_to_forget) + 1) % 10] for label in forget_labels]
-                print(forget_prompts, noise_prompts)
 
                 forget_batch = {
                     "jpg": forget_images.permute(0, 2, 3, 1),
@@ -140,6 +138,9 @@ def erasediff(
                 forget_input, forget_emb = model.get_input(
                     forget_batch, model.first_stage_key
                 )
+
+                # noise_prompts = [descriptions[(int(class_to_forget) + 1) % 10] for label in forget_labels]
+                noise_prompts = ["a photo of a pokemon"] * forget_batch['jpg'].size(0)
                 noise_batch = {
                     "jpg": forget_images.permute(0, 2, 3, 1),
                     "txt": noise_prompts,
@@ -188,8 +189,7 @@ def erasediff(
                     remain_images, remain_labels = next(iter(remain_dl))
                     remain_prompts = [descriptions[label] for label in remain_labels]
                     forget_prompts = [descriptions[label] for label in forget_labels]
-                    noise_prompts = [descriptions[(int(class_to_forget) + 1) % 10] for label in forget_labels]
-
+                    
                     noise = torch.randn_like(forget_input, device=model.device) # Gaussian noise
 
                     remain_batch = {
@@ -205,6 +205,9 @@ def erasediff(
                     forget_input, forget_emb = model.get_input(
                         forget_batch, model.first_stage_key
                     )
+
+                    # noise_prompts = [descriptions[(int(class_to_forget) + 1) % 10] for label in forget_labels]
+                    noise_prompts = ["a photo of a pokemon"] * forget_batch['jpg'].size(0)
                     noise_batch = {
                         "jpg": forget_images.permute(0, 2, 3, 1),
                         "txt": noise_prompts,
@@ -240,10 +243,10 @@ def erasediff(
                                 print(n)
                     optimizer.step()
                     step += 1
-                    if (step+1) % 50 == 0:
+                    if ((step+1) % 10 == 0):
                         print(f"step: {i}, unl_loss: {unl_losses.avg.detach():.4f}, loss_du: {loss_du:.4f}, loss_q: {loss_q:.4f}, loss_dr: {loss_dr:.4f}, loss: {loss:.4f}")
                         model.eval()
-                        save_model(model, name, step - 1, save_compvis=True, save_diffusers=True, compvis_config_file=config_path, diffusers_config_file=diffusers_config_path)
+                        save_model(model, name, step+1, save_compvis=True, save_diffusers=True, compvis_config_file=config_path, diffusers_config_file=diffusers_config_path)
                         save_history(losses, name, classes)
 
                     t.set_description("Epoch %i" % epoch)
