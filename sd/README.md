@@ -22,7 +22,7 @@ We consider forgetting the nudity in the following steps.
 python eval_scripts/generate-images_nude.py --prompts_path 'prompts/nsfw.csv' --save_path 'evaluation_folder/NSFW&NotNSFW/' --model_name 'SD' --device 'cuda:0' --num_samples $N
 ```
 
-2. Forgetting Training with SA.
+2. Forgetting Training with EraseDiff.
 
 ```
 python erasediff_nsfw.py --train_method 'noxattn' --device '2' --epochs $E --K_steps $K --lambda_bome $lambda --lr 1e-5 --batch_size 16
