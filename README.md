@@ -15,7 +15,8 @@
 
 
 ## Abstract
-In this work, we introduce an unlearning algorithm for diffusion models. Our algorithm equips a diffusion model with a mechanism to mitigate the concerns related to data memorization. To achieve this, we formulate the unlearning problem as a constraint optimization problem, aiming to preserve the utility of the diffusion model on the remaining data and scrub the information associated with forgetting data by deviating the learnable generative process from the ground-truth denoising procedure. To solve the resulting problem, we adopt a first-order method, having superior practical performance while being vigilant about the diffusion process. Empirically, we demonstrate that our algorithm can preserve the model utility, effectiveness, and efficiency while removing across the widely-used diffusion models and in both conditional and unconditional image generation scenarios.
+We introduce EraseDiff, an unlearning algorithm designed for diffusion models to address concerns related to data memorization. Our approach formulates the unlearning task as a constrained optimization problem, aiming to preserve the utility of the diffusion model on retained data while removing the information associated with the data to be forgotten. This is achieved by altering the generative process to deviate away from the ground-truth denoising procedure. 
+To manage the computational complexity inherent in the diffusion process, we develop a first-order method for solving the optimization problem, which has shown empirical benefits. Extensive experiments and thorough comparisons with state-of-the-art algorithms demonstrate that EraseDiff effectively preserves the model's utility, efficacy, and efficiency.
 
 ## Getting Started
 The code is split into two subfolders, i.e., DDPM and Stable Diffusion experiments. Detailed instructions are included in the respective subfolders.
