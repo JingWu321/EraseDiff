@@ -294,7 +294,7 @@ def erasediff(
                         print(f"step: {i}, unl_loss: {unl_losses.avg.detach():.4f}, loss_du: {loss_du:.4f}, loss_q: {loss_q:.4f}, loss_dr: {loss_dr:.4f}, loss: {loss:.4f}")
                         save_history(losses, name, word_print)
                         model.eval()
-                        save_model(model, name, step - 1, save_compvis=True, save_diffusers=True, compvis_config_file=config_path, diffusers_config_file=diffusers_config_path)
+                        save_model(model, name, step+1, save_compvis=True, save_diffusers=True, compvis_config_file=config_path, diffusers_config_file=diffusers_config_path)
 
                     time.set_description("Epoch %i" % epoch)
                     time.set_postfix(loss=loss.item() / batch_size)
