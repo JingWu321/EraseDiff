@@ -174,7 +174,6 @@ def erasediff(
                         device=model.device,
                     ).long()
                     noise = torch.randn_like(forget_input, device=model.device)
-                    # normal_noise = torch.rand_like(forget_input, device=model.device) # normal noise
                     forget_noisy = model.q_sample(x_start=forget_input, t=t, noise=noise)
                     forget_out = model.apply_model(forget_noisy, t, forget_emb)
                     pseudo_noisy = model.q_sample(x_start=pseudo_input, t=t, noise=noise)
@@ -240,7 +239,43 @@ def erasediff(
 
                     loss_q = loss_du - unl_losses.avg.detach()  # line 2 in Algorithm 1 (BOME!)
                     # [3] Get lambda_bome
-                    # TODO
+                    if args.lambda_bome < 0:
+                        optimizer.zero_grad()
+                        q_grads = torch.autograd.grad(loss_q, model.parameters(), retain_graph=True)
+                        torch.cuda.empty_cache()
+                        gc.collect()
+                        q_grad_vector = torch.stack(list(map(lambda q_grad: torch.cat(list(map(lambda grad: grad.contiguous().view(-1), q_grad))), [q_grads])))
+                        torch.cuda.empty_cache()
+                        gc.collect()
+                        q_grad_norm = torch.linalg.norm(q_grad_vector, 2)
+                        torch.cuda.empty_cache()
+                        gc.collect()
+                        if q_grad_norm == 0:
+                            lambda_bome = 0.
+                        else:
+                            # compute the gradient of the loss_dr w.r.t. the model parameters
+                            optimizer.zero_grad()
+                            dr_grads = torch.autograd.grad(loss_dr, model.parameters(), retain_graph=True)
+                            torch.cuda.empty_cache()
+                            gc.collect()
+                            # similarity between dr_grads_vector and q_grad_vector
+                            # compute the inner product of the gradient of dr_grads and q_grads
+                            dr_grads_vector = torch.stack(list(map(lambda dr_grad: torch.cat(list(map(lambda grad: grad.contiguous().view(-1), dr_grad))), [dr_grads])))
+                            dr_grad_norm = torch.linalg.norm(dr_grads_vector, 2)
+                            torch.cuda.empty_cache()
+                            gc.collect()
+                            inner_product = torch.sum(dr_grads_vector * q_grad_vector)
+                            tmp = inner_product / ( dr_grad_norm * q_grad_norm + 1e-8)
+                            # tmp = inner_product / (q_grad_norm + 1e-8) # original verison in BOME!
+                            # compute the lambda_bome
+                            lambda_bome = (args.eta_bome - tmp).detach() if args.eta_bome > tmp else 0.
+                            print(f'lambda_bome {lambda_bome}, tmp {tmp}')
+                            torch.cuda.empty_cache()
+                            gc.collect()
+                            del dr_grads, dr_grads_vector, tmp
+                        del q_grads, q_grad_vector, q_grad_norm
+                    else:
+                        lambda_bome = args.lambda_bome
 
                     # [4] Update the model parameters # line 3 in Algorithm 1 (BOME!)
                     loss = loss_dr + lambda_bome * loss_q
@@ -259,13 +294,16 @@ def erasediff(
                         print(f"step: {i}, unl_loss: {unl_losses.avg.detach():.4f}, loss_du: {loss_du:.4f}, loss_q: {loss_q:.4f}, loss_dr: {loss_dr:.4f}, loss: {loss:.4f}")
                         save_history(losses, name, word_print)
                         model.eval()
-                        save_model(model, name, step + 1, save_compvis=True, save_diffusers=True, compvis_config_file=config_path, diffusers_config_file=diffusers_config_path)
+                        save_model(model, name, step - 1, save_compvis=True, save_diffusers=True, compvis_config_file=config_path, diffusers_config_file=diffusers_config_path)
 
                     time.set_description("Epoch %i" % epoch)
                     time.set_postfix(loss=loss.item() / batch_size)
                     sleep(0.1)
                     time.update(1)
 
+                    # used_num_samples += remain_images.shape[0]
+                    # if used_num_samples > rem_num:
+                    #     break
 
     model.eval()
     save_model(
