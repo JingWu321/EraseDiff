@@ -246,7 +246,7 @@ def erasediff(
                     if ((step+1) % 10 == 0):
                         print(f"step: {i}, unl_loss: {unl_losses.avg.detach():.4f}, loss_du: {loss_du:.4f}, loss_q: {loss_q:.4f}, loss_dr: {loss_dr:.4f}, loss: {loss:.4f}")
                         model.eval()
-                        save_model(model, name, step, save_compvis=True, save_diffusers=True, compvis_config_file=config_path, diffusers_config_file=diffusers_config_path)
+                        save_model(model, name, step+1, save_compvis=True, save_diffusers=True, compvis_config_file=config_path, diffusers_config_file=diffusers_config_path)
                         save_history(losses, name, classes)
 
                     t.set_description("Epoch %i" % epoch)
