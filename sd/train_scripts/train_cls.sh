@@ -1,7 +1,7 @@
 # # imagenette
 
 ## Perform unlearning
-# python erasediff_rl.py --class_to_forget 0 --train_method 'full' --device '0' --epochs 2 --K_steps 1 --lr 1e-5 --lambda_bome 1. --batch_size 16
+# python erasediff.py --class_to_forget 0 --train_method 'full' --device '0' --epochs 2 --K_steps 1 --lr 1e-5 --lambda_bome 1. --batch_size 16
 
 
 ## Generate images (step 60 is enough)
