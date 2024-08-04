@@ -742,9 +742,6 @@ class Diffusion(object):
                         x_0 = unl_imgs.to(self.device)
                         y_t = unl_labs.to(self.device)
                         x_0 = data_transform(config, x_0) #######
-
-                        # Sample normal noise to add to the images
-                        noise = torch.rand_like(x_0).to(self.device)
                         n = x_0.size(0)
                         b = self.betas
 
@@ -753,7 +750,25 @@ class Diffusion(object):
                             low=0, high=self.num_timesteps, size=(n // 2 + 1,)
                         ).to(self.device)
                         t = torch.cat([t, self.num_timesteps - t - 1], dim=0)[:n]
-                        unl_loss = loss_registry_conditional[config.model.type](model, x_0, t, y_t, noise, b, cond_drop_prob = 0.)
+
+                        # # rl
+                        noise = torch.randn_like(x_0).to(self.device)
+                        a = (1 - b).cumprod(dim=0).index_select(0, t).view(-1, 1, 1, 1)
+                        x_0 = x_0 * a.sqrt() + noise * (1.0 - a).sqrt()
+                        output = model(x_0, t.float(), y_t, mode="train")
+                        pseudo_c = torch.full(
+                            y_t.shape,
+                            # (args.label_to_forget + 1) % 10,
+                            torch.randint(1, 10, (1,)).item(),
+                            device=y_t.device,
+                        )
+                        pseudo = model(x_0, t.float(), pseudo_c, mode="train").detach()
+                        unl_loss = criteria(pseudo, output)
+
+                        # # # normal noise
+                        # noise = torch.rand_like(x_0).to(self.device) # Sample normal noise to add to the images
+                        # unl_loss = loss_registry_conditional[config.model.type](model, x_0, t, y_t, noise, b, cond_drop_prob = 0.)
+
                         optimizer.zero_grad()
                         unl_loss.backward()
                         optimizer.step()
@@ -777,7 +792,6 @@ class Diffusion(object):
                         images_u = data_transform(config, images_u) #######
 
                         noise_r = torch.randn_like(images_r).to(self.device) # Gaussian noise
-                        noise_u = torch.rand_like(images_u).to(self.device)
                         n = images_r.size(0)
                         n_u = images_u.size(0)
                         b = self.betas
@@ -787,7 +801,25 @@ class Diffusion(object):
                         t_u = torch.cat([t_u, self.num_timesteps - t_u - 1], dim=0)[:n_u]
 
                         loss_dr = loss_registry_conditional[config.model.type](model, images_r, t, labels_r, noise_r, b, cond_drop_prob = 0.)
-                        loss_du = loss_registry_conditional[config.model.type](model, images_u, t_u, labels_u, noise_u, b, cond_drop_prob = 0.)
+
+                        # # rl
+                        noise_u = torch.randn_like(images_u).to(self.device)
+                        a = (1 - b).cumprod(dim=0).index_select(0, t).view(-1, 1, 1, 1)
+                        images_u = images_u * a.sqrt() + noise_u * (1.0 - a).sqrt()
+                        output = model(images_u, t.float(), labels_u, mode="train")
+                        pseudo_c = torch.full(
+                            labels_u.shape,
+                            # (args.label_to_forget + 1) % 10,
+                            torch.randint(1, 10, (1,)).item(),
+                            device=labels_u.device,
+                        )
+                        pseudo = model(images_u, t.float(), pseudo_c, mode="train").detach()
+                        loss_du = criteria(pseudo, output)
+
+                        # # # normal noise
+                        # noise_u = torch.rand_like(images_u).to(self.device)
+                        # loss_du = loss_registry_conditional[config.model.type](model, images_u, t_u, labels_u, noise_u, b, cond_drop_prob = 0.)
+
                         loss_q = loss_du - unl_losses.avg.detach()  # line 2 in Algorithm 1 (BOME!)
 
                         # [3] Get lambda_bome
